@@ -10,9 +10,10 @@ matches, and submit an adoption application — all in a clean, modern web app.
 | -------- | ----------------------------------------------------------- |
 | Frontend | React 18, Vite, TypeScript, Tailwind CSS                    |
 | Backend  | Node.js, Express, TypeScript                                |
-| Database | SQLite (via `better-sqlite3`, auto-seeded on first run)     |
+| Storage  | Portable in-memory store, seeded on boot, best-effort JSON persistence (no native deps) |
 | AI       | Local deterministic matching engine + optional OpenAI notes |
 | Tooling  | npm workspaces, ESLint 9 (flat config), `tsx`, Node test runner |
+| Deploy   | Vercel (static client + serverless API) — see [Deploy to Vercel](#deploy-to-vercel) |
 
 This is an **npm workspaces monorepo**:
 
@@ -75,5 +76,30 @@ If the key is absent or the call fails, the app falls back to the local engine s
 | GET    | `/api/applications`  | List submitted adoption applications       |
 | POST   | `/api/applications`  | Submit an adoption application             |
 
-The SQLite database lives in `server/data/pataadopt.db` and is created and seeded automatically on
-first launch.
+Data is seeded in memory on boot and best-effort persisted to `server/data/state.json` locally
+(`/tmp/pataadopt-state.json` on serverless). No external database or native module is required.
+
+## Deploy to Vercel
+
+The repo ships a [`vercel.json`](vercel.json) so the monorepo deploys as a single Vercel project:
+
+- **Static frontend** — `npm run build` produces `client/dist`, served as the site (`outputDirectory`).
+- **Serverless API** — [`api/index.ts`](api/index.ts) wraps the Express app; the rewrite
+  `/(api/:path*)` routes all `/api/*` requests to it on the same origin.
+
+```jsonc
+{
+  "installCommand": "npm install",
+  "buildCommand": "npm run build",      // builds server (tsc) + client (vite)
+  "outputDirectory": "client/dist",
+  "rewrites": [{ "source": "/api/:path*", "destination": "/api" }]
+}
+```
+
+Importing the project into Vercel needs no manual settings — `vercel.json` overrides the framework
+preset (this is what resolves the `No Output Directory named "build"` error). The frontend calls the
+API at the same origin (`/api/...`), so no `VITE_API_URL` is needed in production. Set
+`OPENAI_API_KEY` in the Vercel project to enable LLM-enriched match notes.
+
+> Persistence on Vercel is per-instance and ephemeral (writes go to `/tmp`), which is expected for a
+> serverless demo — adoption submissions reset on cold starts.
