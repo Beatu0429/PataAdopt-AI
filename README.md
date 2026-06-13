@@ -84,22 +84,29 @@ Data is seeded in memory on boot and best-effort persisted to `server/data/state
 The repo ships a [`vercel.json`](vercel.json) so the monorepo deploys as a single Vercel project:
 
 - **Static frontend** — `npm run build` produces `client/dist`, served as the site (`outputDirectory`).
-- **Serverless API** — [`api/index.ts`](api/index.ts) wraps the Express app; the rewrite
-  `/(api/:path*)` routes all `/api/*` requests to it on the same origin.
+- **Serverless API** — the catch-all function [`api/[...path].ts`](api/) wraps the Express app.
+  Vercel's file-system routing maps every `/api/*` request to it with the original URL preserved,
+  so Express routes `/api/pets`, `/api/match`, etc. correctly.
 
 ```jsonc
 {
   "installCommand": "npm install",
   "buildCommand": "npm run build",      // builds server (tsc) + client (vite)
-  "outputDirectory": "client/dist",
-  "rewrites": [{ "source": "/api/:path*", "destination": "/api" }]
+  "outputDirectory": "client/dist"
 }
 ```
+
+> A catch-all function (not `api/index.ts` + a `rewrite`) is used on purpose: Vercel `rewrites`
+> push the matched sub-path into the query string, so an `api/index.ts` would only ever see `/api`
+> and return 404 for `/api/pets`. The catch-all receives the full original path.
 
 Importing the project into Vercel needs no manual settings — `vercel.json` overrides the framework
 preset (this is what resolves the `No Output Directory named "build"` error). The frontend calls the
 API at the same origin (`/api/...`), so no `VITE_API_URL` is needed in production. Set
 `OPENAI_API_KEY` in the Vercel project to enable LLM-enriched match notes.
+
+> If the pet grid stays empty on a deployed site, check that **Deployment Protection / Vercel
+> Authentication** isn't blocking the `/api/*` requests for visitors.
 
 > Persistence on Vercel is per-instance and ephemeral (writes go to `/tmp`), which is expected for a
 > serverless demo — adoption submissions reset on cold starts.
