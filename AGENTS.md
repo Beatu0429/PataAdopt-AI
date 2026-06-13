@@ -2,8 +2,10 @@
 
 PataAdopt-AI is an npm-workspaces monorepo:
 
-- `server/` — Express + TypeScript REST API, SQLite via `better-sqlite3`.
+- `server/` — Express + TypeScript REST API with a portable in-memory store (no native deps).
 - `client/` — React + Vite + TypeScript + Tailwind SPA.
+- `api/` — thin Vercel serverless entrypoint that re-exports the compiled Express app
+  (`server/dist/app.js`); only used by Vercel, not local dev.
 
 Standard commands are documented in `README.md` (root scripts: `dev`, `build`, `lint`,
 `typecheck`, `test`). Run them from the repo root.
@@ -13,14 +15,26 @@ Standard commands are documented in `README.md` (root scripts: `dev`, `build`, `
 - Dependencies install with a single root `npm install` (npm workspaces hoist both `server/` and
   `client/`). This is already handled by the startup update script — do not reinstall unless
   `package.json` changed.
-- `better-sqlite3` is a native module; it installs via prebuilt binaries on Node 22 here. If a
-  Node version change ever forces a source build, `make`/`gcc`/`g++`/`python3` are available.
 - Run both services together with `npm run dev` from the repo root (uses `concurrently`). The API
   listens on `:4000` and the Vite client on `:5173`. The client dev server proxies `/api/*` to the
   API, so start the API (or just use `npm run dev`) before exercising the UI.
-- The SQLite file is created and seeded automatically at `server/data/pataadopt.db` on first run;
-  it is gitignored. Delete it to reset to the seeded catalog. Submitting an adoption application
-  marks that pet as `adopted`, so re-seeding may be needed to repeat the full flow on a fresh state.
+- Storage is an in-memory store seeded on boot, best-effort persisted to `server/data/state.json`
+  (gitignored) locally and `/tmp/pataadopt-state.json` on serverless. Delete the file to reset to
+  the seeded catalog. Submitting an adoption marks that pet `adopted`, so reset to repeat the full
+  flow from scratch. There is no native dependency (no `better-sqlite3`).
 - AI matching works with no secrets (local deterministic engine). Setting `OPENAI_API_KEY` (and
   optionally `OPENAI_MODEL`) only adds an extra LLM-generated note for the top match; absence or
   failure falls back to the local engine.
+
+### Vercel deployment
+
+- `vercel.json` drives the deploy: `buildCommand` runs `npm run build` (compiles `server/` to
+  `server/dist` AND builds the client to `client/dist`); `outputDirectory` is `client/dist`; a
+  rewrite sends `/api/:path*` to the serverless function `api/index.ts`.
+- `api/index.ts` imports `../server/dist/app.js`, so the server MUST be compiled before the function
+  is bundled — that ordering is guaranteed because Vercel runs `buildCommand` before building
+  `/api`. If you change the server build output dir, update that import path.
+- Local dev does NOT use `api/` or `vercel.json`; only the Vercel build does. To reproduce the
+  exact production routing locally (static `client/dist` + same-origin `/api`), build first
+  (`npm run build`) then serve `client/dist` statically while mounting the compiled Express app for
+  `/api/*` on the same port.
