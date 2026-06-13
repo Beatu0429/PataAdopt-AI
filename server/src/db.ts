@@ -1,136 +1,98 @@
-import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { seedPets } from "./seed.js";
 import type { AdoptionApplication, Pet } from "./types.js";
 
+/**
+ * Portable persistence layer.
+ *
+ * Data lives in memory (seeded on boot) and is best-effort persisted to a JSON
+ * file so local development survives restarts. On read-only/serverless
+ * filesystems the file write simply no-ops and the app keeps working from
+ * memory. This avoids native dependencies (e.g. better-sqlite3), which makes the
+ * API trivially deployable to serverless platforms such as Vercel.
+ */
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, "..", "data");
-const DB_PATH = process.env.DB_PATH ?? join(DATA_DIR, "pataadopt.db");
 
-mkdirSync(DATA_DIR, { recursive: true });
-
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS pets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    species TEXT NOT NULL,
-    breed TEXT NOT NULL,
-    age INTEGER NOT NULL,
-    size TEXT NOT NULL,
-    energy TEXT NOT NULL,
-    goodWithKids INTEGER NOT NULL,
-    goodWithPets INTEGER NOT NULL,
-    hypoallergenic INTEGER NOT NULL,
-    description TEXT NOT NULL,
-    photoUrl TEXT NOT NULL,
-    adopted INTEGER NOT NULL DEFAULT 0
-  );
-
-  CREATE TABLE IF NOT EXISTS applications (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    petId INTEGER NOT NULL,
-    applicantName TEXT NOT NULL,
-    email TEXT NOT NULL,
-    message TEXT NOT NULL,
-    createdAt TEXT NOT NULL,
-    FOREIGN KEY (petId) REFERENCES pets(id)
-  );
-`);
-
-const petCount = (db.prepare("SELECT COUNT(*) AS c FROM pets").get() as { c: number }).c;
-if (petCount === 0) {
-  const insert = db.prepare(`
-    INSERT INTO pets (name, species, breed, age, size, energy, goodWithKids, goodWithPets, hypoallergenic, description, photoUrl, adopted)
-    VALUES (@name, @species, @breed, @age, @size, @energy, @goodWithKids, @goodWithPets, @hypoallergenic, @description, @photoUrl, @adopted)
-  `);
-  const insertMany = db.transaction((pets: Omit<Pet, "id">[]) => {
-    for (const p of pets) {
-      insert.run({
-        ...p,
-        goodWithKids: p.goodWithKids ? 1 : 0,
-        goodWithPets: p.goodWithPets ? 1 : 0,
-        hypoallergenic: p.hypoallergenic ? 1 : 0,
-        adopted: p.adopted ? 1 : 0
-      });
-    }
-  });
-  insertMany(seedPets);
+function resolveDataFile(): string {
+  if (process.env.DATA_FILE) return process.env.DATA_FILE;
+  // Serverless filesystems are read-only except for /tmp.
+  if (process.env.VERCEL) return "/tmp/pataadopt-state.json";
+  return join(__dirname, "..", "data", "state.json");
 }
 
-interface PetRow {
-  id: number;
-  name: string;
-  species: string;
-  breed: string;
-  age: number;
-  size: string;
-  energy: string;
-  goodWithKids: number;
-  goodWithPets: number;
-  hypoallergenic: number;
-  description: string;
-  photoUrl: string;
-  adopted: number;
+const DATA_FILE = resolveDataFile();
+
+interface PersistedState {
+  pets: Pet[];
+  applications: AdoptionApplication[];
+  nextApplicationId: number;
 }
 
-function rowToPet(row: PetRow): Pet {
+function freshState(): PersistedState {
   return {
-    id: row.id,
-    name: row.name,
-    species: row.species as Pet["species"],
-    breed: row.breed,
-    age: row.age,
-    size: row.size as Pet["size"],
-    energy: row.energy as Pet["energy"],
-    goodWithKids: Boolean(row.goodWithKids),
-    goodWithPets: Boolean(row.goodWithPets),
-    hypoallergenic: Boolean(row.hypoallergenic),
-    description: row.description,
-    photoUrl: row.photoUrl,
-    adopted: Boolean(row.adopted)
+    pets: seedPets.map((p, i) => ({ ...p, id: i + 1 })),
+    applications: [],
+    nextApplicationId: 1
   };
 }
 
+function load(): PersistedState {
+  try {
+    const raw = readFileSync(DATA_FILE, "utf8");
+    const parsed = JSON.parse(raw) as PersistedState;
+    if (Array.isArray(parsed.pets) && parsed.pets.length > 0) {
+      return parsed;
+    }
+  } catch {
+    // No existing state (or unreadable) — start from seed.
+  }
+  return freshState();
+}
+
+const state: PersistedState = load();
+
+function persist(): void {
+  try {
+    mkdirSync(dirname(DATA_FILE), { recursive: true });
+    writeFileSync(DATA_FILE, JSON.stringify(state, null, 2), "utf8");
+  } catch {
+    // Read-only filesystem (e.g. serverless) — keep operating from memory.
+  }
+}
+
 export function getAllPets(): Pet[] {
-  const rows = db.prepare("SELECT * FROM pets ORDER BY id").all() as PetRow[];
-  return rows.map(rowToPet);
+  return state.pets.map((p) => ({ ...p }));
 }
 
 export function getPetById(id: number): Pet | undefined {
-  const row = db.prepare("SELECT * FROM pets WHERE id = ?").get(id) as PetRow | undefined;
-  return row ? rowToPet(row) : undefined;
+  const pet = state.pets.find((p) => p.id === id);
+  return pet ? { ...pet } : undefined;
 }
 
 export function markAdopted(id: number): void {
-  db.prepare("UPDATE pets SET adopted = 1 WHERE id = ?").run(id);
+  const pet = state.pets.find((p) => p.id === id);
+  if (pet) {
+    pet.adopted = true;
+    persist();
+  }
 }
 
 export function createApplication(
   input: Omit<AdoptionApplication, "id" | "createdAt">
 ): AdoptionApplication {
-  const createdAt = new Date().toISOString();
-  const result = db
-    .prepare(
-      `INSERT INTO applications (petId, applicantName, email, message, createdAt)
-       VALUES (?, ?, ?, ?, ?)`
-    )
-    .run(input.petId, input.applicantName, input.email, input.message, createdAt);
-  return {
-    id: Number(result.lastInsertRowid),
-    createdAt,
+  const application: AdoptionApplication = {
+    id: state.nextApplicationId++,
+    createdAt: new Date().toISOString(),
     ...input
   };
+  state.applications.push(application);
+  persist();
+  return application;
 }
 
 export function getApplications(): AdoptionApplication[] {
-  return db
-    .prepare("SELECT * FROM applications ORDER BY createdAt DESC")
-    .all() as AdoptionApplication[];
+  return [...state.applications].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
-
-export default db;
