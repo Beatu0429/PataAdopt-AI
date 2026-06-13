@@ -12,3 +12,6 @@ coverage/
 *.db
 data/*.db
 .vite/
+
+# Vercel
+.vercel/
